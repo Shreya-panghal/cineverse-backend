@@ -11,7 +11,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-TMDB_KEY = "11c4ceadf008afcd7625b853"
+TMDB_KEY = "11c4ceadf0084afcd7625b853"
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w500"
 BACKDROP = "https://image.tmdb.org/t/p/original"
