@@ -1,11 +1,9 @@
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
-import pandas as pd
-import pickle
-from sklearn.metrics.pairwise import cosine_similarity
+import requests
 
-app = FastAPI(title="CineVerse AI API", version="1.0.0")
+app = FastAPI(title="CineVerse AI API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,48 +12,91 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-POSTER_BASE = "https://image.tmdb.org/t/p/w500"
-BACKDROP_BASE = "https://image.tmdb.org/t/p/original"
-
-# Dummy data for testing
-MOVIES = [
-    {"id": 1, "title": "Inception", "genres": ["Action", "Sci-Fi"], "director": "Christopher Nolan", "cast": ["Leonardo DiCaprio"], "rating": 8.8, "release_year": "2010", "poster_path": "/9gk7adHYeDvHkCSEqAvQNLV5Uge.jpg", "overview": "A thief who steals corporate secrets through dream-sharing technology.", "trailer_key": "YoHD9XEInc0", "backdrop_path": "/s3TBrRGB1iav7gFOCNx3H31MoES.jpg", "tagline": "Your mind is the scene of the crime", "runtime": 148},
-    {"id": 2, "title": "The Dark Knight", "genres": ["Action", "Crime"], "director": "Christopher Nolan", "cast": ["Christian Bale", "Heath Ledger"], "rating": 9.0, "release_year": "2008", "poster_path": "/qJ2tW6WMUDux911r6m7haRef0WH.jpg", "overview": "Batman faces the Joker, a criminal mastermind.", "trailer_key": "EXeTwQWrcwY", "backdrop_path": "/hqkIcbrOHL86UncnHIsHVcVmzue.jpg", "tagline": "Why so serious?", "runtime": 152},
-    {"id": 3, "title": "Interstellar", "genres": ["Sci-Fi", "Drama"], "director": "Christopher Nolan", "cast": ["Matthew McConaughey"], "rating": 8.6, "release_year": "2014", "poster_path": "/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg", "overview": "A team of explorers travel through a wormhole in space.", "trailer_key": "zSWdZVtXT7E", "backdrop_path": "/xJHokMbljvjADYdit5fK5VQsXEG.jpg", "tagline": "Mankind was born on Earth. It was never meant to die here.", "runtime": 169},
-]
+TMDB_KEY = "your_tmdb_api_key_here"
+TMDB_BASE = "https://api.themoviedb.org/3"
+POSTER = "https://image.tmdb.org/t/p/w500"
+BACKDROP = "https://image.tmdb.org/t/p/original"
 
 def format_movie(m):
-    m = dict(m)
     if m.get('poster_path'):
-        m['poster_url'] = POSTER_BASE + m['poster_path']
+        m['poster_url'] = POSTER + m['poster_path']
     if m.get('backdrop_path'):
-        m['backdrop_url'] = BACKDROP_BASE + m['backdrop_path']
-    if m.get('trailer_key'):
-        m['trailer_url'] = f"https://www.youtube.com/embed/{m['trailer_key']}"
+        m['backdrop_url'] = BACKDROP + m['backdrop_path']
+    if m.get('videos'):
+        trailers = [v for v in m['videos'].get('results', []) if v['type'] == 'Trailer' and v['site'] == 'YouTube']
+        if trailers:
+            m['trailer_key'] = trailers[0]['key']
+    if m.get('credits'):
+        directors = [c['name'] for c in m['credits'].get('crew', []) if c['job'] == 'Director']
+        m['director'] = directors[0] if directors else 'Unknown'
+        m['cast'] = [c['name'] for c in m['credits'].get('cast', [])[:5]]
+    if m.get('genres'):
+        m['genres'] = [g['name'] for g in m['genres']]
+    m['release_year'] = str(m.get('release_date', ''))[:4]
+    m['rating'] = round(m.get('vote_average', 0), 1)
     return m
+
+def tmdb_get(endpoint, params={}):
+    params['api_key'] = TMDB_KEY
+    params['language'] = 'en-US'
+    r = requests.get(f"{TMDB_BASE}{endpoint}", params=params)
+    return r.json()
 
 @app.get("/")
 def root():
-    return {"message": "CineVerse AI is running!", "movies": len(MOVIES)}
+    return {"message": "CineVerse AI is running!"}
 
 @app.get("/trending")
 def trending(n: int = 20):
-    return {"results": [format_movie(m) for m in MOVIES[:n]]}
+    data = tmdb_get("/movie/popular", {"page": 1})
+    movies = []
+    for m in data.get('results', [])[:n]:
+        detail = tmdb_get(f"/movie/{m['id']}", {"append_to_response": "credits,videos"})
+        movies.append(format_movie(detail))
+    return {"results": movies}
 
 @app.get("/search")
-def search(q: str = Query(..., min_length=1), limit: int = 10):
-    results = [m for m in MOVIES if q.lower() in m['title'].lower()]
-    return {"results": [format_movie(m) for m in results[:limit]]}
+def search(q: str = Query(...), limit: int = 10):
+    data = tmdb_get("/search/movie", {"query": q})
+    results = []
+    for m in data.get('results', [])[:limit]:
+        m['poster_url'] = POSTER + m['poster_path'] if m.get('poster_path') else None
+        m['release_year'] = str(m.get('release_date', ''))[:4]
+        m['rating'] = round(m.get('vote_average', 0), 1)
+        m['genres'] = []
+        results.append(m)
+    return {"results": results}
 
 @app.get("/recommend/{title}")
 def recommend(title: str, n: int = 10):
-    results = [m for m in MOVIES if m['title'].lower() != title.lower()]
-    return {"source_movie": title, "results": [format_movie(m) for m in results[:n]]}
+    search_data = tmdb_get("/search/movie", {"query": title})
+    results_raw = search_data.get('results', [])
+    if not results_raw:
+        return {"source_movie": title, "results": []}
+    source = results_raw[0]
+    source_detail = tmdb_get(f"/movie/{source['id']}", {"append_to_response": "similar,credits,videos"})
+    similar = source_detail.get('similar', {}).get('results', [])[:n]
+    movies = []
+    for m in similar:
+        detail = tmdb_get(f"/movie/{m['id']}", {"append_to_response": "credits,videos"})
+        fm = format_movie(detail)
+        fm['similarity'] = round(85 + (m.get('vote_average', 7) * 1.2), 1)
+        movies.append(fm)
+    return {"source_movie": title, "results": movies}
 
 @app.get("/movie/{movie_id}")
 def movie_detail(movie_id: int):
-    movie = next((m for m in MOVIES if m['id'] == movie_id), None)
-    if not movie:
-        return {"error": "Movie not found"}
-    return format_movie(movie)
-# Run with: uvicorn main:app --reload --port 8000
+    m = tmdb_get(f"/movie/{movie_id}", {"append_to_response": "credits,videos"})
+    return format_movie(m)
+
+@app.get("/genre/{genre_name}")
+def by_genre(genre_name: str, n: int = 20):
+    genres_data = tmdb_get("/genre/movie/list")
+    genre_map = {g['name'].lower(): g['id'] for g in genres_data.get('genres', [])}
+    genre_id = genre_map.get(genre_name.lower())
+    if not genre_id:
+        return {"results": []}
+    data = tmdb_get("/discover/movie", {"with_genres": genre_id, "sort_by": "popularity.desc"})
+    movies = []
+    for m in data.get('results', [])[:n]:
+        m['poster_url'] = POSTER + m['poster_path'] if m.get('poster_path') el
